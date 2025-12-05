@@ -9,10 +9,19 @@ import sys
 import argparse
 import pandas as pd
 import tempfile
+import gzip
 from dotenv import load_dotenv
 from s3_client import S3Client
 
 load_dotenv()
+
+# GTFS-realtime VehicleStopStatus reverse mapping
+STATUS_REVERSE_MAPPING = {
+    0: 'INCOMING_AT',
+    1: 'STOPPED_AT',
+    2: 'IN_TRANSIT_TO',
+    3: 'UNKNOWN',
+}
 
 
 def decode_parquet_from_s3(s3_path: str):
@@ -39,23 +48,32 @@ def decode_parquet_from_s3(s3_path: str):
         
         # Download to temporary file
         print(f"⬇️  Downloading from S3: {s3_path}")
-        with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as tmp_file:
-            temp_path = tmp_file.name
+        with tempfile.NamedTemporaryFile(suffix='.parquet.gz', delete=False) as tmp_file:
+            temp_gz_path = tmp_file.name
         
-        # Download the file
+        # Download the compressed file
         s3_client.s3_client.download_file(
             s3_client.bucket_name,
             s3_path,
-            temp_path
+            temp_gz_path
         )
-        print(f"✓ Downloaded to temporary file\n")
+        print(f"✓ Downloaded compressed file\n")
+        
+        # Decompress the file
+        temp_path = temp_gz_path.replace('.gz', '')
+        with gzip.open(temp_gz_path, 'rb') as f_in:
+            with open(temp_path, 'wb') as f_out:
+                f_out.write(f_in.read())
+        
+        print(f"✓ Decompressed file\n")
         
         # Decode the parquet file
         decode_local_parquet(temp_path)
         
         # Clean up
+        os.remove(temp_gz_path)
         os.remove(temp_path)
-        print(f"\n✓ Cleaned up temporary file")
+        print(f"\n✓ Cleaned up temporary files")
         
     except Exception as e:
         print(f"✗ Error: {e}")
@@ -67,15 +85,33 @@ def decode_parquet_from_s3(s3_path: str):
 def decode_local_parquet(file_path: str):
     """
     Decode and display a local Parquet file.
+    Handles both .parquet and .parquet.gz files.
     
     Args:
-        file_path: Path to local Parquet file
+        file_path: Path to local Parquet file (can be .parquet or .parquet.gz)
     """
     try:
-        print(f"📂 Reading Parquet file: {file_path}\n")
+        # Check if file is gzip-compressed
+        if file_path.endswith('.gz'):
+            print(f"📂 Decompressing and reading Parquet file: {file_path}\n")
+            # Decompress to temporary file
+            temp_path = file_path.replace('.gz', '')
+            with gzip.open(file_path, 'rb') as f_in:
+                with open(temp_path, 'wb') as f_out:
+                    f_out.write(f_in.read())
+            
+            # Read the decompressed file
+            df = pd.read_parquet(temp_path, engine='pyarrow')
+            
+            # Clean up temporary file
+            os.remove(temp_path)
+        else:
+            print(f"📂 Reading Parquet file: {file_path}\n")
+            df = pd.read_parquet(file_path, engine='pyarrow')
         
-        # Read the parquet file
-        df = pd.read_parquet(file_path, engine='pyarrow')
+        # Convert status codes back to strings
+        if 'status' in df.columns:
+            df['status'] = df['status'].map(STATUS_REVERSE_MAPPING).fillna('UNKNOWN')
         
         # Display file information
         print("=" * 80)
@@ -94,14 +130,6 @@ def decode_local_parquet(file_path: str):
             non_null = df[col].notna().sum()
             null_count = df[col].isna().sum()
             print(f"  {col:25s} | {str(dtype):15s} | Non-null: {non_null:5d} | Null: {null_count:5d}")
-        
-        # Display basic statistics for numeric columns
-        numeric_cols = df.select_dtypes(include=['number']).columns
-        if len(numeric_cols) > 0:
-            print("\n" + "=" * 80)
-            print("NUMERIC COLUMN STATISTICS")
-            print("=" * 80)
-            print(df[numeric_cols].describe())
         
         # Display first few rows
         print("\n" + "=" * 80)

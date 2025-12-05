@@ -7,6 +7,8 @@ import boto3
 from botocore.exceptions import ClientError
 import logging
 import os
+import gzip
+import shutil
 from datetime import datetime
 from typing import Optional
 
@@ -52,7 +54,7 @@ class S3Client:
             
             # Test connection by checking if bucket exists
             self.s3_client.head_bucket(Bucket=self.bucket_name)
-            logger.info(f"Successfully connected to S3 bucket: {self.bucket_name}")
+            logger.debug(f"Successfully connected to S3 bucket: {self.bucket_name}")
             
         except ClientError as e:
             error_code = e.response['Error']['Code']
@@ -70,11 +72,12 @@ class S3Client:
     def disconnect(self):
         """Close S3 connection."""
         self.s3_client = None
-        logger.info("Disconnected from S3")
+        logger.debug("Disconnected from S3")
     
     def upload_parquet_file(self, local_file_path: str, trip_date: Optional[datetime] = None) -> str:
         """
         Upload a Parquet file to S3 organized by year/month/day.
+        Compresses the file with gzip before uploading.
         
         Args:
             local_file_path: Path to the local Parquet file
@@ -91,21 +94,52 @@ class S3Client:
             # Extract filename from path
             filename = os.path.basename(local_file_path)
             
-            # Create S3 key with year/month/day structure
+            # Create S3 key with year/month/day structure and .gz extension
             year = trip_date.strftime('%Y')
             month = trip_date.strftime('%m')
             day = trip_date.strftime('%d')
             
-            s3_key = f"trips/{year}/{month}/{day}/{filename}"
+            s3_key = f"trips/{year}/{month}/{day}/{filename}.gz"
             
-            # Upload file
+            # Get original file size
+            original_size = os.path.getsize(local_file_path)
+            
+            # Compress file with gzip
+            gzip_file_path = f"{local_file_path}.gz"
+            with open(local_file_path, 'rb') as f_in:
+                with gzip.open(gzip_file_path, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            
+            # Get compressed file size
+            compressed_size = os.path.getsize(gzip_file_path)
+            compression_ratio = (1 - compressed_size / original_size) * 100
+            
+            logger.debug(f"Compressed {filename}: {original_size:,} bytes → {compressed_size:,} bytes "
+                       f"({compression_ratio:.1f}% reduction)")
+            
+            # Check if file already exists in S3
+            file_exists = False
+            try:
+                self.s3_client.head_object(Bucket=self.bucket_name, Key=s3_key)
+                file_exists = True
+                logger.debug(f"File exists in S3, will overwrite: {s3_key}")
+            except ClientError as e:
+                if e.response['Error']['Code'] != '404':
+                    raise
+            
+            # Upload compressed file (overwrites if exists)
             self.s3_client.upload_file(
-                local_file_path,
+                gzip_file_path,
                 self.bucket_name,
-                s3_key
+                s3_key,
+                ExtraArgs={'ContentType': 'application/x-parquet', 'ContentEncoding': 'gzip'}
             )
             
-            logger.info(f"Successfully uploaded {filename} to s3://{self.bucket_name}/{s3_key}")
+            # Clean up compressed file
+            os.remove(gzip_file_path)
+            logger.debug(f"Cleaned up temporary gzip file: {gzip_file_path}")
+            
+            logger.debug(f"Successfully uploaded {filename}.gz to s3://{self.bucket_name}/{s3_key}")
             return s3_key
             
         except ClientError as e:

@@ -43,7 +43,7 @@ class RedisClient:
             )
             # Test connection
             self.client.ping()
-            logger.info(f"Successfully connected to Redis at {self.host}:{self.port}")
+            logger.debug(f"Successfully connected to Redis at {self.host}:{self.port}")
         except redis.ConnectionError as e:
             logger.error(f"Failed to connect to Redis: {e}")
             raise
@@ -52,7 +52,7 @@ class RedisClient:
         """Close Redis connection."""
         if self.client:
             self.client.close()
-            logger.info("Disconnected from Redis")
+            logger.debug("Disconnected from Redis")
     
     def get_trip_completion_keys(self, pattern: str = "trip:*:*:completion") -> List[str]:
         """
@@ -67,10 +67,56 @@ class RedisClient:
         """
         try:
             keys = self.client.keys(pattern)
-            logger.info(f"Found {len(keys)} trip completion keys")
+            logger.debug(f"Found {len(keys)} trip completion keys")
             return keys
         except Exception as e:
             logger.error(f"Error retrieving trip completion keys: {e}")
+            return []
+    
+    def get_completed_trip_status_keys(self, min_days_old: int = 0) -> List[tuple]:
+        """
+        Get all completed trips from trip:*:status keys that are at least N days old.
+        
+        Args:
+            min_days_old: Only return trips completed at least this many days ago (default: 0 for all)
+        
+        Returns:
+            List of tuples (trip_id, start_date, status_key) for completed trips
+        """
+        try:
+            from datetime import datetime, timedelta
+            
+            # Find all status keys
+            status_keys = self.client.keys("trip:*:*:status")
+            logger.debug(f"Found {len(status_keys)} trip status keys")
+            
+            # Calculate cutoff date if filtering by age
+            cutoff_date = None
+            if min_days_old > 0:
+                cutoff_date = (datetime.now() - timedelta(days=min_days_old)).strftime('%Y%m%d')
+                logger.debug(f"Filtering for trips older than {min_days_old} days (before {cutoff_date})")
+            
+            completed_trips = []
+            for key in status_keys:
+                # Get the status value
+                status = self.client.get(key)
+                if status and status.lower() == 'completed':
+                    # Extract trip_id and start_date from key: trip:{trip_id}:{start_date}:status
+                    parts = key.split(':')
+                    if len(parts) == 4 and parts[0] == 'trip' and parts[-1] == 'status':
+                        trip_id = parts[1]
+                        start_date = parts[2]
+                        
+                        # Apply age filter if specified
+                        if cutoff_date and start_date >= cutoff_date:
+                            continue  # Skip trips that are too recent
+                        
+                        completed_trips.append((trip_id, start_date, key))
+            
+            logger.debug(f"Found {len(completed_trips)} completed trips matching criteria")
+            return completed_trips
+        except Exception as e:
+            logger.error(f"Error retrieving completed trip status keys: {e}")
             return []
     
     def get_trip_completion_data(self, trip_id: str, start_date: str) -> Optional[Dict[str, Any]]:
@@ -165,7 +211,7 @@ class RedisClient:
             else:
                 messages = self.client.xrange(stream_key, min=start_id, max=end_id)
             
-            logger.info(f"Retrieved {len(messages)} messages from stream {stream_key}")
+            logger.debug(f"Retrieved {len(messages)} messages from stream {stream_key}")
             
             # Format the data
             formatted_data = []
@@ -204,14 +250,14 @@ class RedisClient:
             if self.client.exists(pattern):
                 stream_type = self.client.type(pattern)
                 if stream_type == 'stream':
-                    logger.info(f"Found stream for trip {trip_id}: {pattern}")
+                    logger.debug(f"Found stream for trip {trip_id}: {pattern}")
                     return pattern
         
         # Try searching with wildcard
         keys = self.client.keys(f"*{trip_id}*")
         for key in keys:
             if self.client.type(key) == 'stream':
-                logger.info(f"Found stream for trip {trip_id}: {key}")
+                logger.debug(f"Found stream for trip {trip_id}: {key}")
                 return key
         
         logger.warning(f"No stream found for trip {trip_id}")
@@ -237,7 +283,7 @@ class RedisClient:
     
     def delete_trip_data(self, trip_id: str, start_date: str) -> bool:
         """
-        Delete all Redis data for a trip (completion hash and track stream).
+        Delete all Redis data for a trip (completion hash, track stream, and status).
         
         Args:
             trip_id: Trip identifier
@@ -254,17 +300,24 @@ class RedisClient:
             if self.client.exists(completion_key):
                 self.client.delete(completion_key)
                 deleted_count += 1
-                logger.info(f"Deleted completion key: {completion_key}")
+                logger.debug(f"Deleted completion key: {completion_key}")
+            
+            # Delete status key
+            status_key = f"trip:{trip_id}:{start_date}:status"
+            if self.client.exists(status_key):
+                self.client.delete(status_key)
+                deleted_count += 1
+                logger.debug(f"Deleted status key: {status_key}")
             
             # Find and delete stream
             stream_key = self.find_trip_stream(trip_id, start_date)
             if stream_key:
                 self.client.delete(stream_key)
                 deleted_count += 1
-                logger.info(f"Deleted stream key: {stream_key}")
+                logger.debug(f"Deleted stream key: {stream_key}")
             
             if deleted_count > 0:
-                logger.info(f"Deleted {deleted_count} Redis keys for trip {trip_id}")
+                logger.debug(f"Deleted {deleted_count} Redis keys for trip {trip_id}")
                 return True
             else:
                 logger.warning(f"No Redis keys found to delete for trip {trip_id}")

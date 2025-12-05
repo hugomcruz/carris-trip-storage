@@ -12,6 +12,21 @@ import json
 
 logger = logging.getLogger(__name__)
 
+# GTFS-realtime VehicleStopStatus mapping
+# Maps status strings to uint8 values
+STATUS_MAPPING = {
+    'INCOMING_AT': 0,
+    'STOPPED_AT': 1,
+    'IN_TRANSIT_TO': 2,
+    # Numeric values are kept as-is
+    '0': 0,
+    '1': 1,
+    '2': 2,
+    # Unknown/default
+    'UNKNOWN': 3,
+    '3': 3,
+}
+
 
 class ParquetWriter:
     """Writer for trip track data in Parquet format."""
@@ -27,10 +42,32 @@ class ParquetWriter:
         self._ensure_output_dir()
         
     def _ensure_output_dir(self):
-        """Create output directory if it doesn't exist."""
-        if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir)
-            logger.info(f"Created output directory: {self.output_dir}")
+        """Create output directory if it doesn't exist. Thread-safe."""
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            if not os.path.exists(self.output_dir):
+                logger.debug(f"Created output directory: {self.output_dir}")
+        except FileExistsError:
+            # Race condition - another thread created it, which is fine
+            pass
+    
+    def cleanup_output_dir(self):
+        """Clean up any leftover Parquet files from previous runs."""
+        try:
+            if os.path.exists(self.output_dir):
+                parquet_files = [f for f in os.listdir(self.output_dir) if f.endswith('.parquet')]
+                if parquet_files:
+                    logger.warning(f"Found {len(parquet_files)} leftover Parquet files from previous run - deleting:")
+                    for filename in parquet_files:
+                        filepath = os.path.join(self.output_dir, filename)
+                        try:
+                            os.remove(filepath)
+                            logger.warning(f"  Deleted: {filename}")
+                        except Exception as e:
+                            logger.error(f"  Failed to delete {filename}: {e}")
+                    logger.warning(f"Cleanup complete - {len(parquet_files)} files deleted")
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
     
     def write_trip_track_data(self, trip_id: str, track_data: List[Dict[str, Any]], start_date: str) -> Optional[str]:
         """
@@ -61,10 +98,20 @@ class ParquetWriter:
             filename = f"trip-{trip_id}-{start_date}-{timestamp}.parquet"
             filepath = os.path.join(self.output_dir, filename)
             
-            # Write to Parquet
-            df.to_parquet(filepath, engine='pyarrow', compression='snappy', index=False)
+            # Write to Parquet with maximum compression
+            # zstd provides better compression than gzip with similar speed
+            # use_dictionary=True enables dictionary encoding for repeated values
+            df.to_parquet(
+                filepath, 
+                engine='pyarrow', 
+                compression='zstd',
+                compression_level=22,  # Maximum compression (1-22)
+                index=False,
+                use_dictionary=True,
+                write_statistics=False  # Skip statistics to reduce size
+            )
             
-            logger.info(f"Successfully wrote {len(df)} track points to {filepath}")
+            logger.debug(f"Successfully wrote {len(df)} track points to {filepath}")
             return filepath
             
         except Exception as e:
@@ -84,16 +131,12 @@ class ParquetWriter:
         records = []
         
         for entry in track_data:
-            record = {
-                'message_id': entry.get('message_id'),
-                'timestamp': entry.get('timestamp'),
-            }
-            
-            # Extract data fields
+            # Extract data fields directly, no wrapper record
             data = entry.get('data', {})
             
             # Common fields in tracking data
             if isinstance(data, dict):
+                record = {}
                 # Flatten the data dictionary
                 for key, value in data.items():
                     # Handle nested JSON strings
@@ -110,52 +153,134 @@ class ParquetWriter:
                     else:
                         record[key] = value
             else:
-                record['data'] = str(data)
+                record = {'data': str(data)}
             
             records.append(record)
         
         df = pd.DataFrame(records)
         
-        # Convert timestamp column to datetime if it exists
-        if 'timestamp' in df.columns and df['timestamp'].notna().any():
-            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-        
-        # Convert stop_id to string to preserve original values and avoid float representation
+        # Convert stop_id to integer
         if 'stop_id' in df.columns:
-            df['stop_id'] = df['stop_id'].apply(lambda x: str(int(x)) if pd.notna(x) and x != '' else '')
+            df['stop_id'] = pd.to_numeric(df['stop_id'], errors='coerce').fillna(0).astype('uint16')
+        
+        # Convert vehicle_id to integer
+        if 'vehicle_id' in df.columns:
+            df['vehicle_id'] = pd.to_numeric(df['vehicle_id'], errors='coerce').fillna(0).astype('uint16')
+        
+        # Convert stop_sequence to integer
+        if 'stop_sequence' in df.columns:
+            df['stop_sequence'] = pd.to_numeric(df['stop_sequence'], errors='coerce').fillna(0).astype('uint8')
+        
+        # Convert bearing to integer (0-360 degrees)
+        if 'bearing' in df.columns:
+            df['bearing'] = pd.to_numeric(df['bearing'], errors='coerce').fillna(0).astype('uint16')
+        
+        # Convert speed to integer
+        if 'speed' in df.columns:
+            df['speed'] = pd.to_numeric(df['speed'], errors='coerce').fillna(0).astype('uint8')
+        
+        # Convert status to integer using GTFS-realtime mapping
+        if 'status' in df.columns:
+            df['status'] = df['status'].apply(lambda x: self._map_status(x))
+        
+        # Preserve lat/lon as float64 for precision
+        if 'lat' in df.columns:
+            df['lat'] = pd.to_numeric(df['lat'], errors='coerce').astype('float64')
+        if 'lon' in df.columns:
+            df['lon'] = pd.to_numeric(df['lon'], errors='coerce').astype('float64')
+        
+        # Convert timestamp fields to uint32
+        if 'ts' in df.columns:
+            df['ts'] = pd.to_numeric(df['ts'], errors='coerce').fillna(0).astype('uint32')
+        if 'service_date' in df.columns:
+            df['service_date'] = pd.to_numeric(df['service_date'], errors='coerce').fillna(0).astype('uint32')
         
         # Ensure numeric columns are properly typed
         self._optimize_dtypes(df)
         
         return df
     
+    def _map_status(self, status_value: Any) -> int:
+        """
+        Map status string or numeric value to GTFS-realtime uint8 code.
+        
+        Args:
+            status_value: Status as string or number
+            
+        Returns:
+            uint8 status code (0-3)
+        """
+        if pd.isna(status_value) or status_value == '':
+            return 3  # Unknown
+        
+        # Convert to string and uppercase for mapping
+        status_str = str(status_value).upper().strip()
+        
+        # Return mapped value or default to 3 (Unknown)
+        return STATUS_MAPPING.get(status_str, 3)
+    
     def _optimize_dtypes(self, df: pd.DataFrame):
         """
         Optimize DataFrame data types for better storage.
+        Uses smallest possible integer types to minimize file size.
         
         Args:
             df: Pandas DataFrame to optimize (modified in place)
         """
-        # Columns to keep as strings
-        string_columns = {'stop_id'}
+        # Columns to exclude from optimization (keep original types)
+        exclude_columns = {'lat', 'lon', 'ts', 'service_date'}  # Preserve float precision for coordinates and explicit uint32 for timestamps
         
         for col in df.columns:
             # Skip timestamp columns
             if df[col].dtype == 'datetime64[ns]':
                 continue
             
-            # Skip columns that should remain as strings
-            if col in string_columns:
+            # Skip excluded columns (lat/lon coordinates)
+            if col in exclude_columns:
                 continue
-                
-            # Try converting to numeric if possible
+            
+            # Convert numeric columns to smallest possible type
             if df[col].dtype == 'object':
                 try:
-                    # Try integer first
+                    # Try converting to numeric
                     converted = pd.to_numeric(df[col], errors='coerce')
-                    if converted.notna().all() or converted.notna().sum() / len(df) > 0.5:
-                        df[col] = converted
-                        continue
+                    if converted.notna().sum() / len(df) > 0.5:
+                        # Determine best integer type
+                        if converted.min() >= 0:
+                            # Unsigned integers for positive values
+                            if converted.max() <= 255:
+                                df[col] = converted.astype('uint8')
+                            elif converted.max() <= 65535:
+                                df[col] = converted.astype('uint16')
+                            elif converted.max() <= 4294967295:
+                                df[col] = converted.astype('uint32')
+                            else:
+                                df[col] = converted.astype('uint64')
+                        else:
+                            # Signed integers for negative values
+                            if converted.min() >= -128 and converted.max() <= 127:
+                                df[col] = converted.astype('int8')
+                            elif converted.min() >= -32768 and converted.max() <= 32767:
+                                df[col] = converted.astype('int16')
+                            elif converted.min() >= -2147483648 and converted.max() <= 2147483647:
+                                df[col] = converted.astype('int32')
+                            else:
+                                df[col] = converted.astype('int64')
+                except (ValueError, TypeError):
+                    pass
+            elif df[col].dtype in ['int64', 'float64']:
+                # Downcast existing numeric types
+                try:
+                    if df[col].dtype == 'float64':
+                        # Check if can be integer
+                        if (df[col] == df[col].astype('int64')).all():
+                            df[col] = df[col].astype('int64')
+                    
+                    # Downcast integers
+                    if df[col].dtype in ['int64', 'int32', 'int16']:
+                        df[col] = pd.to_numeric(df[col], downcast='integer')
+                    elif df[col].dtype == 'float64':
+                        df[col] = pd.to_numeric(df[col], downcast='float')
                 except (ValueError, TypeError):
                     pass
         
