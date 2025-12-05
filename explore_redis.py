@@ -39,8 +39,13 @@ def main():
         print("=" * 60)
         
         for i, key in enumerate(keys[:5], 1):
-            trip_id = redis.extract_trip_id_from_key(key)
-            print(f"\n[{i}] Trip ID: {trip_id}")
+            result = redis.extract_trip_id_from_key(key)
+            if not result:
+                print(f"\n[{i}] Could not parse key: {key}")
+                continue
+            
+            trip_id, start_date = result
+            print(f"\n[{i}] Trip ID: {trip_id}, Start Date: {start_date}")
             print(f"    Key: {key}")
             
             data = redis.get_trip_completion_data_by_key(key)
@@ -48,7 +53,7 @@ def main():
                 print(f"    Data: {json.dumps(data, indent=2, default=str)}")
                 
                 # Look for stream
-                stream_key = redis.find_trip_stream(trip_id)
+                stream_key = redis.find_trip_stream(trip_id, start_date)
                 if stream_key:
                     print(f"    📊 Stream found: {stream_key}")
                     track_data = redis.get_stream_data(stream_key, count=5)

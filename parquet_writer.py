@@ -32,13 +32,14 @@ class ParquetWriter:
             os.makedirs(self.output_dir)
             logger.info(f"Created output directory: {self.output_dir}")
     
-    def write_trip_track_data(self, trip_id: str, track_data: List[Dict[str, Any]]) -> Optional[str]:
+    def write_trip_track_data(self, trip_id: str, track_data: List[Dict[str, Any]], start_date: str) -> Optional[str]:
         """
         Write trip track data to a Parquet file.
         
         Args:
             trip_id: Trip identifier
             track_data: List of track data points from Redis stream
+            start_date: Trip start date (format: YYYYMMDD) - required
             
         Returns:
             Path to the created Parquet file or None if failed
@@ -55,9 +56,9 @@ class ParquetWriter:
                 logger.warning(f"Empty DataFrame for trip {trip_id}")
                 return None
             
-            # Generate filename with timestamp
+            # Generate filename with timestamp and start_date
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"trip_{trip_id}_{timestamp}.parquet"
+            filename = f"trip-{trip_id}-{start_date}-{timestamp}.parquet"
             filepath = os.path.join(self.output_dir, filename)
             
             # Write to Parquet
@@ -119,6 +120,10 @@ class ParquetWriter:
         if 'timestamp' in df.columns and df['timestamp'].notna().any():
             df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
         
+        # Convert stop_id to string to preserve original values and avoid float representation
+        if 'stop_id' in df.columns:
+            df['stop_id'] = df['stop_id'].apply(lambda x: str(int(x)) if pd.notna(x) and x != '' else '')
+        
         # Ensure numeric columns are properly typed
         self._optimize_dtypes(df)
         
@@ -131,9 +136,16 @@ class ParquetWriter:
         Args:
             df: Pandas DataFrame to optimize (modified in place)
         """
+        # Columns to keep as strings
+        string_columns = {'stop_id'}
+        
         for col in df.columns:
             # Skip timestamp columns
             if df[col].dtype == 'datetime64[ns]':
+                continue
+            
+            # Skip columns that should remain as strings
+            if col in string_columns:
                 continue
                 
             # Try converting to numeric if possible

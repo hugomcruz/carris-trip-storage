@@ -35,8 +35,11 @@ python main.py --trip-id <trip_id>
 
 ## Data Flow
 
-1. **Redis `trip:*:completion`**: Trip metadata is extracted and stored in MySQL
+1. **Redis `trip:{trip_id}:{start_date}:completion`**: Trip metadata is extracted and stored in PostgreSQL/MySQL
+   - Keys now include start_date (format: YYYYMMDD) to distinguish trips across consecutive days
+   - Example: `trip:21520:20250901:completion`
 2. **Redis STREAM**: Trip track details are extracted and stored in Parquet files
+   - Stream keys follow pattern: `trip:{trip_id}:{start_date}:track`
 
 ## Project Structure
 

@@ -97,43 +97,43 @@ class TripProcessor:
             self.s3_client.disconnect()
         logger.info("Disconnected from all services")
         
-    def process_trip(self, trip_id: str) -> bool:
+    def process_trip(self, trip_id: str, start_date: str) -> bool:
         """
         Process a single trip: extract completion data and track data.
         
         Args:
             trip_id: Trip identifier
+            start_date: Trip start date (format: YYYYMMDD) - required
             
         Returns:
             True if successful, False otherwise
         """
-        logger.info(f"Processing trip: {trip_id}")
-        
-        # Log processing start
-        self.postgres_client.log_trip_processing(trip_id, 'processing')
+        logger.info(f"Processing trip: {trip_id} (start_date: {start_date})")
         
         try:
-            # 1. Get and store trip completion data
-            completion_data = self.redis_client.get_trip_completion_data(trip_id)
+            # Get and store trip completion data
+            completion_data = self.redis_client.get_trip_completion_data(trip_id, start_date)
             
             if not completion_data:
                 logger.warning(f"No completion data found for trip {trip_id}")
                 self.postgres_client.log_trip_processing(
-                    trip_id, 'failed', 
+                    trip_id, start_date, 'failed', 
                     error_message='No completion data found'
                 )
                 return False
             
-            # Ensure trip_id is in the data
+            # Ensure trip_id and start_date are in the data
             if 'trip_id' not in completion_data and 'id' not in completion_data:
                 completion_data['trip_id'] = trip_id
+            if 'start_date' not in completion_data:
+                completion_data['start_date'] = start_date
             
             # Store in PostgreSQL
             success = self.postgres_client.insert_trip_completion(completion_data)
             if not success:
                 logger.error(f"Failed to store completion data for trip {trip_id}")
                 self.postgres_client.log_trip_processing(
-                    trip_id, 'failed',
+                    trip_id, start_date, 'failed',
                     error_message='Failed to store completion data'
                 )
                 return False
@@ -141,13 +141,13 @@ class TripProcessor:
             logger.info(f"Stored completion data for trip {trip_id} in PostgreSQL")
             
             # 2. Get and store trip track data from stream
-            stream_key = self.redis_client.find_trip_stream(trip_id)
+            stream_key = self.redis_client.find_trip_stream(trip_id, start_date)
             
             if not stream_key:
                 logger.warning(f"No stream found for trip {trip_id}")
                 # Mark as completed even without stream data
                 self.postgres_client.log_trip_processing(
-                    trip_id, 'completed',
+                    trip_id, start_date, 'completed',
                     error_message='No stream data found'
                 )
                 return True
@@ -158,18 +158,18 @@ class TripProcessor:
             if not track_data:
                 logger.warning(f"No track data in stream {stream_key}")
                 self.postgres_client.log_trip_processing(
-                    trip_id, 'completed',
+                    trip_id, start_date, 'completed',
                     error_message='Stream exists but no data found'
                 )
                 return True
             
             # Write to Parquet
-            parquet_path = self.parquet_writer.write_trip_track_data(trip_id, track_data)
+            parquet_path = self.parquet_writer.write_trip_track_data(trip_id, track_data, start_date)
             
             if not parquet_path:
                 logger.error(f"Failed to write Parquet file for trip {trip_id}")
                 self.postgres_client.log_trip_processing(
-                    trip_id, 'failed',
+                    trip_id, start_date, 'failed',
                     error_message='Failed to write Parquet file'
                 )
                 return False
@@ -210,13 +210,13 @@ class TripProcessor:
             
             # Log successful processing
             self.postgres_client.log_trip_processing(
-                trip_id, 'completed',
+                trip_id, start_date, 'completed',
                 parquet_file_path=s3_path if s3_path else parquet_path
             )
             
             # Delete trip data from Redis after successful processing
-            logger.info(f"Deleting Redis data for trip {trip_id}")
-            if self.redis_client.delete_trip_data(trip_id):
+            logger.info(f"Deleting Redis data for trip {trip_id} (start_date: {start_date})")
+            if self.redis_client.delete_trip_data(trip_id, start_date):
                 logger.info(f"Successfully deleted Redis data for trip {trip_id}")
             else:
                 logger.warning(f"Failed to delete some Redis data for trip {trip_id}")
@@ -227,7 +227,7 @@ class TripProcessor:
         except Exception as e:
             logger.error(f"Error processing trip {trip_id}: {e}", exc_info=True)
             self.postgres_client.log_trip_processing(
-                trip_id, 'failed',
+                trip_id, start_date, 'failed',
                 error_message=str(e)
             )
             return False
@@ -255,16 +255,18 @@ class TripProcessor:
         }
         
         for key in keys:
-            # Extract trip ID from key
-            trip_id = self.redis_client.extract_trip_id_from_key(key)
+            # Extract trip ID and start_date from key
+            result = self.redis_client.extract_trip_id_from_key(key)
             
-            if not trip_id:
-                logger.warning(f"Could not extract trip ID from key: {key}")
+            if not result:
+                logger.warning(f"Could not extract trip ID and start_date from key: {key}")
                 stats['failed'] += 1
                 continue
             
+            trip_id, start_date = result
+            
             # Process the trip
-            if self.process_trip(trip_id):
+            if self.process_trip(trip_id, start_date):
                 stats['success'] += 1
             else:
                 stats['failed'] += 1
@@ -274,22 +276,22 @@ class TripProcessor:
         
         return stats
     
-    def list_trips_in_redis(self) -> List[str]:
+    def list_trips_in_redis(self) -> List[tuple]:
         """
-        List all trip IDs available in Redis.
+        List all trip IDs and start_dates available in Redis.
         
         Returns:
-            List of trip IDs
+            List of tuples (trip_id, start_date)
         """
         keys = self.redis_client.get_trip_completion_keys()
-        trip_ids = []
+        trips = []
         
         for key in keys:
-            trip_id = self.redis_client.extract_trip_id_from_key(key)
-            if trip_id:
-                trip_ids.append(trip_id)
+            result = self.redis_client.extract_trip_id_from_key(key)
+            if result:
+                trips.append(result)
         
-        return trip_ids
+        return trips
     
     def show_trip_info(self, trip_id: str):
         """
@@ -370,10 +372,10 @@ def main():
         
         # Execute requested action
         if args.list:
-            trip_ids = processor.list_trips_in_redis()
-            print(f"\nFound {len(trip_ids)} trips in Redis:")
-            for trip_id in trip_ids:
-                print(f"  - {trip_id}")
+            trips = processor.list_trips_in_redis()
+            print(f"\nFound {len(trips)} trips in Redis:")
+            for trip_id, start_date in trips:
+                print(f"  - {trip_id} (start_date: {start_date})")
                 
         elif args.info:
             processor.show_trip_info(args.info)

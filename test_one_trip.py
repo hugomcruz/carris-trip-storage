@@ -36,12 +36,13 @@ try:
     print("✓ MySQL connected")
     
     # Process one trip
-    trip_id = '21520_20250901_241_0_20'
-    print(f"\nProcessing trip: {trip_id}")
+    trip_id = '21520'
+    start_date = '20250901'  # Adjust this to your actual trip start date
+    print(f"\nProcessing trip: {trip_id} (start_date: {start_date})")
     
     # Get completion data
     print("  Getting completion data...")
-    completion = redis.get_trip_completion_data(trip_id)
+    completion = redis.get_trip_completion_data(trip_id, start_date)
     print(f"  ✓ Got completion data: {list(completion.keys())}")
     
     # Store in MySQL
@@ -51,7 +52,7 @@ try:
     
     # Get stream data
     print("  Finding stream...")
-    stream_key = redis.find_trip_stream(trip_id)
+    stream_key = redis.find_trip_stream(trip_id, start_date)
     print(f"  ✓ Found stream: {stream_key}")
     
     print("  Getting track data...")
@@ -60,7 +61,7 @@ try:
     
     # Write Parquet
     print("  Writing Parquet file...")
-    file_path = parquet.write_trip_track_data(trip_id, track_data)
+    file_path = parquet.write_trip_track_data(trip_id, track_data, start_date)
     print(f"  ✓ Wrote: {file_path}")
     
     # Log processing

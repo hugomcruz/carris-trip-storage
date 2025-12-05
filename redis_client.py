@@ -54,9 +54,10 @@ class RedisClient:
             self.client.close()
             logger.info("Disconnected from Redis")
     
-    def get_trip_completion_keys(self, pattern: str = "trip:*:completion") -> List[str]:
+    def get_trip_completion_keys(self, pattern: str = "trip:*:*:completion") -> List[str]:
         """
         Get all trip completion keys matching the pattern.
+        Pattern now includes start_date: trip:{trip_id}:{start_date}:completion
         
         Args:
             pattern: Redis key pattern to match
@@ -72,18 +73,19 @@ class RedisClient:
             logger.error(f"Error retrieving trip completion keys: {e}")
             return []
     
-    def get_trip_completion_data(self, trip_id: str) -> Optional[Dict[str, Any]]:
+    def get_trip_completion_data(self, trip_id: str, start_date: str) -> Optional[Dict[str, Any]]:
         """
         Get trip completion data for a specific trip.
         Handles both string and hash data types.
         
         Args:
             trip_id: Trip identifier
+            start_date: Trip start date (format: YYYYMMDD)
             
         Returns:
             Dictionary containing trip completion data or None
         """
-        key = f"trip:{trip_id}:completion"
+        key = f"trip:{trip_id}:{start_date}:completion"
         try:
             # Check the type of the key
             key_type = self.client.type(key)
@@ -179,24 +181,23 @@ class RedisClient:
             logger.error(f"Error retrieving stream data from {stream_key}: {e}")
             return []
     
-    def find_trip_stream(self, trip_id: str) -> Optional[str]:
+    def find_trip_stream(self, trip_id: str, start_date: str) -> Optional[str]:
         """
         Find the stream key for a specific trip.
-        Common patterns: trip:{trip_id}:track, trip:{trip_id}:stream, etc.
+        Common patterns: trip:{trip_id}:{start_date}:track, trip:{trip_id}:{start_date}:stream, etc.
         
         Args:
             trip_id: Trip identifier
+            start_date: Trip start date (format: YYYYMMDD)
             
         Returns:
             Stream key if found, None otherwise
         """
         patterns = [
-            f"trip:{trip_id}:track",
-            f"trip:{trip_id}:stream",
-            f"trip:{trip_id}:location",
-            f"trip:{trip_id}:gps",
-            f"{trip_id}:track",
-            f"{trip_id}:stream"
+            f"trip:{trip_id}:{start_date}:track",
+            f"trip:{trip_id}:{start_date}:stream",
+            f"trip:{trip_id}:{start_date}:location",
+            f"trip:{trip_id}:{start_date}:gps"
         ]
         
         for pattern in patterns:
@@ -234,12 +235,13 @@ class RedisClient:
         except (ValueError, IndexError):
             return None
     
-    def delete_trip_data(self, trip_id: str) -> bool:
+    def delete_trip_data(self, trip_id: str, start_date: str) -> bool:
         """
         Delete all Redis data for a trip (completion hash and track stream).
         
         Args:
             trip_id: Trip identifier
+            start_date: Trip start date (format: YYYYMMDD)
             
         Returns:
             True if successful, False otherwise
@@ -248,14 +250,14 @@ class RedisClient:
             deleted_count = 0
             
             # Delete completion hash
-            completion_key = f"trip:{trip_id}:completion"
+            completion_key = f"trip:{trip_id}:{start_date}:completion"
             if self.client.exists(completion_key):
                 self.client.delete(completion_key)
                 deleted_count += 1
                 logger.info(f"Deleted completion key: {completion_key}")
             
             # Find and delete stream
-            stream_key = self.find_trip_stream(trip_id)
+            stream_key = self.find_trip_stream(trip_id, start_date)
             if stream_key:
                 self.client.delete(stream_key)
                 deleted_count += 1
@@ -272,20 +274,20 @@ class RedisClient:
             logger.error(f"Error deleting trip data for {trip_id}: {e}")
             return False
     
-    def extract_trip_id_from_key(self, key: str) -> Optional[str]:
+    def extract_trip_id_from_key(self, key: str) -> Optional[tuple]:
         """
-        Extract trip ID from a completion key.
+        Extract trip ID and start_date from a completion key.
         
         Args:
-            key: Redis key (e.g., trip:12345:completion)
+            key: Redis key (e.g., trip:12345:20250901:completion)
             
         Returns:
-            Trip ID or None
+            Tuple of (trip_id, start_date) or None
         """
         try:
             parts = key.split(':')
-            if len(parts) >= 3 and parts[0] == 'trip' and parts[-1] == 'completion':
-                return parts[1]
+            if len(parts) == 4 and parts[0] == 'trip' and parts[-1] == 'completion':
+                return (parts[1], parts[2])
             return None
         except Exception:
             return None

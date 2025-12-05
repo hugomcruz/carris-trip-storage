@@ -73,6 +73,7 @@ class PostgreSQLClient:
         try:
             # Extract fields from trip data
             trip_id = trip_data.get('trip_id') or trip_data.get('id')
+            start_date = trip_data.get('start_date') or trip_data.get('service_date')
             vehicle_id = trip_data.get('vehicle_id')
             route_id = trip_data.get('route_id')
             driver_id = trip_data.get('driver_id')
@@ -97,14 +98,15 @@ class PostgreSQLClient:
             
             query = """
                 INSERT INTO trips (
-                    trip_id, vehicle_id, route_id, driver_id, license_plate,
+                    trip_id, start_date, vehicle_id, route_id, driver_id, license_plate,
                     start_time, end_time, distance_km, duration_minutes, duration_seconds,
                     status, passenger_count, fare_amount, stops_served, total_positions,
                     completion_data
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT (trip_id) DO UPDATE SET
+                    start_date = EXCLUDED.start_date,
                     vehicle_id = EXCLUDED.vehicle_id,
                     route_id = EXCLUDED.route_id,
                     driver_id = EXCLUDED.driver_id,
@@ -124,7 +126,7 @@ class PostgreSQLClient:
             """
             
             values = (
-                trip_id, vehicle_id, route_id, driver_id, license_plate,
+                trip_id, start_date, vehicle_id, route_id, driver_id, license_plate,
                 start_time, end_time, distance_km, duration_minutes, duration_seconds,
                 status, passenger_count, fare_amount, stops_served, total_positions,
                 completion_data
@@ -142,34 +144,45 @@ class PostgreSQLClient:
                 self.connection.rollback()
             return False
     
-    def log_trip_processing(self, trip_id: str, status: str, 
+    def log_trip_processing(self, trip_id: str, start_date: str, status: str, 
                            parquet_file_path: Optional[str] = None,
                            error_message: Optional[str] = None) -> bool:
         """
         Log trip processing status.
+        Only logs 'completed' or 'failed' status per trip per start_date.
         
         Args:
             trip_id: Trip identifier
-            status: Processing status (pending, processing, completed, failed)
+            start_date: Trip start date (format: YYYYMMDD)
+            status: Processing status (completed or failed)
             parquet_file_path: Path to the generated parquet file (optional)
             error_message: Error message if failed (optional)
             
         Returns:
             True if successful, False otherwise
         """
+        # Only log completed or failed status
+        if status not in ('completed', 'failed'):
+            return True
+            
         try:
             query = """
                 INSERT INTO trip_processing_log (
-                    trip_id, processing_status, parquet_file_path, error_message
-                ) VALUES (%s, %s, %s, %s)
+                    trip_id, start_date, processing_status, parquet_file_path, error_message
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (trip_id, start_date) DO UPDATE SET
+                    processing_status = EXCLUDED.processing_status,
+                    parquet_file_path = EXCLUDED.parquet_file_path,
+                    error_message = EXCLUDED.error_message,
+                    processed_at = CURRENT_TIMESTAMP
             """
             
-            values = (trip_id, status, parquet_file_path, error_message)
+            values = (trip_id, start_date, status, parquet_file_path, error_message)
             
             self.cursor.execute(query, values)
             self.connection.commit()
             
-            logger.info(f"Logged processing status for trip {trip_id}: {status}")
+            logger.info(f"Logged processing status for trip {trip_id} ({start_date}): {status}")
             return True
             
         except Error as e:

@@ -48,12 +48,17 @@ def example_1_process_single_trip():
             print("No trips found in Redis")
             return
         
-        trip_id = redis.extract_trip_id_from_key(keys[0])
-        print(f"Processing trip: {trip_id}\n")
+        result = redis.extract_trip_id_from_key(keys[0])
+        if not result:
+            print("Could not extract trip info from key")
+            return
+        
+        trip_id, start_date = result
+        print(f"Processing trip: {trip_id} (start_date: {start_date})\\n")
         
         # Get completion data
-        completion = redis.get_trip_completion_data(trip_id)
-        print(f"Completion data: {completion}\n")
+        completion = redis.get_trip_completion_data_by_key(keys[0])
+        print(f"Completion data: {completion}\\n")
         
         # Store in MySQL
         if completion:
@@ -63,7 +68,7 @@ def example_1_process_single_trip():
             print("Stored in MySQL ✓\n")
         
         # Get stream data
-        stream_key = redis.find_trip_stream(trip_id)
+        stream_key = redis.find_trip_stream(trip_id, start_date)
         if stream_key:
             print(f"Found stream: {stream_key}")
             track_data = redis.get_stream_data(stream_key, count=10)
@@ -71,7 +76,7 @@ def example_1_process_single_trip():
             
             # Write to Parquet
             if track_data:
-                file_path = parquet.write_trip_track_data(trip_id, track_data)
+                file_path = parquet.write_trip_track_data(trip_id, track_data, start_date)
                 print(f"Saved to Parquet: {file_path} ✓")
         
     finally:
@@ -97,8 +102,13 @@ def example_2_list_all_trips():
         print(f"Found {len(keys)} trips:\n")
         
         for i, key in enumerate(keys[:10], 1):  # Show first 10
-            trip_id = redis.extract_trip_id_from_key(key)
-            print(f"{i}. Trip ID: {trip_id}")
+            result = redis.extract_trip_id_from_key(key)
+            if result:
+                trip_id, start_date = result
+                print(f"{i}. Trip ID: {trip_id}, Start Date: {start_date}")
+            else:
+                print(f"{i}. Key: {key} (could not parse)")
+                continue
             
             # Get basic info
             data = redis.get_trip_completion_data_by_key(key)
