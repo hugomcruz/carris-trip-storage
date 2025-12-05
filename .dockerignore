@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Output files
+output/
+*.parquet
+*.parquet.gz
+*.log
+
+# Environment and secrets
+.env
+.env.local
+
+# Git
+.git/
+.gitignore
+.github/
+
+# Documentation
+README.md
+*.md
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+test_*.py
+*_test.py
+
+# Misc
+.DS_Store
