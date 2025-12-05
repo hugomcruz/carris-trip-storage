@@ -26,3 +26,6 @@ output/
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+trip_processing.log
