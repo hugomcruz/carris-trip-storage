@@ -29,4 +29,4 @@ USER appuser
 ENTRYPOINT ["python", "main.py"]
 
 # Default command
-CMD ["--all"]
+#CMD ["--all"]
